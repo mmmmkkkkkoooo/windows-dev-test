@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 355
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Connect to Tailscale
@@ -17,18 +17,18 @@ jobs:
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: Configure RDP
+      - name: Configure Windows RDP
         shell: powershell
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           $Username = "rdpuser"
-          $Password = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          $SecurePassword = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
 
           if (-not (Get-LocalUser -Name $Username -ErrorAction SilentlyContinue)) {
               New-LocalUser `
                 -Name $Username `
-                -Password $Password `
+                -Password $SecurePassword `
                 -PasswordNeverExpires `
                 -AccountNeverExpires
           }
@@ -53,12 +53,17 @@ jobs:
             -Name "UserAuthentication" `
             -Value 1
 
-          Set-Service TermService -StartupType Automatic
-          Start-Service TermService
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
 
-          Get-NetFirewallRule -DisplayGroup "Remote Desktop" `
+          Get-NetFirewallRule `
+            -DisplayGroup "Remote Desktop" `
             -ErrorAction SilentlyContinue |
             Disable-NetFirewallRule
+
+          Remove-NetFirewallRule `
+            -DisplayName "RDP Tailscale Only" `
+            -ErrorAction SilentlyContinue
 
           New-NetFirewallRule `
             -DisplayName "RDP Tailscale Only" `
@@ -66,58 +71,44 @@ jobs:
             -Protocol TCP `
             -LocalPort 3389 `
             -RemoteAddress 100.64.0.0/10 `
-            -Action Allow `
-            -ErrorAction SilentlyContinue
+            -Action Allow
 
-          Write-Host "RDP configured."
+          Write-Host "RDP configured successfully."
 
-      - name: Windows 10-like desktop preferences
+      - name: Windows desktop preferences
         shell: powershell
         run: |
-          # Show file extensions
           Set-ItemProperty `
             -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
             -Name "HideFileExt" `
             -Value 0 `
             -ErrorAction SilentlyContinue
 
-          # Show hidden files
           Set-ItemProperty `
             -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
             -Name "Hidden" `
             -Value 1 `
             -ErrorAction SilentlyContinue
 
-          # Reduce animation effects
           Set-ItemProperty `
             -Path "HKCU:\Control Panel\Desktop\WindowMetrics" `
             -Name "MinAnimate" `
             -Value "0" `
             -ErrorAction SilentlyContinue
 
-          # Performance preference
           Set-ItemProperty `
             -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" `
             -Name "VisualFXSetting" `
             -Value 2 `
             -ErrorAction SilentlyContinue
 
-      - name: Install common desktop apps
+      - name: Install Chrome and 7-Zip
         shell: powershell
         run: |
-          winget install Google.Chrome `
-            --accept-package-agreements `
-            --accept-source-agreements `
-            --silent `
-            --disable-interactivity
+          choco install googlechrome -y --no-progress
+          choco install 7zip -y --no-progress
 
-          winget install 7zip.7zip `
-            --accept-package-agreements `
-            --accept-source-agreements `
-            --silent `
-            --disable-interactivity
-
-      - name: Show connection information
+      - name: Show RDP connection information
         shell: powershell
         run: |
           $ip = tailscale ip -4
@@ -128,7 +119,7 @@ jobs:
           Write-Host "=========================================="
           Write-Host "Tailscale IP: $ip"
           Write-Host "Username: rdpuser"
-          Write-Host "Password: use your RDP_PASSWORD secret"
+          Write-Host "Password: your RDP_PASSWORD secret"
           Write-Host "=========================================="
           Write-Host ""
 
@@ -140,17 +131,18 @@ jobs:
           $EndTime = (Get-Date).AddMinutes(345)
 
           while ((Get-Date) -lt $EndTime) {
+
               $Remaining = New-TimeSpan `
                 -Start (Get-Date) `
                 -End $EndTime
 
               Write-Host (
-                "RDP active - {0}h {1}m remaining" -f `
-                $Remaining.Hours,
-                $Remaining.Minutes
+                  "RDP active - approximately {0}h {1}m remaining" -f `
+                  $Remaining.Hours,
+                  $Remaining.Minutes
               )
 
               Start-Sleep -Seconds 300
           }
 
-          Write-Host "Session ending."
+          Write-Host "RDP session finished."
