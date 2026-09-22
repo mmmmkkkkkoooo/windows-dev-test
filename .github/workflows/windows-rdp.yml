@@ -1,0 +1,123 @@
+name: Windows Development RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows-dev:
+    runs-on: windows-latest
+    timeout-minutes: 355
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Connect runner to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: Configure Windows RDP
+        shell: powershell
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          # Create a dedicated temporary RDP account
+          $Username = "devuser"
+          $SecurePassword = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name $Username -ErrorAction SilentlyContinue)) {
+              New-LocalUser `
+                -Name $Username `
+                -Password $SecurePassword `
+                -PasswordNeverExpires `
+                -AccountNeverExpires
+          }
+
+          # Permit RDP login
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member $Username `
+            -ErrorAction SilentlyContinue
+
+          # Enable Remote Desktop
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          # Require Network Level Authentication
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
+            -Value 1
+
+          # Start Remote Desktop service
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
+
+          # Allow RDP only from Tailscale's CGNAT address range
+          New-NetFirewallRule `
+            -DisplayName "RDP via Tailscale Only" `
+            -Direction Inbound `
+            -Protocol TCP `
+            -LocalPort 3389 `
+            -RemoteAddress 100.64.0.0/10 `
+            -Action Allow `
+            -ErrorAction SilentlyContinue
+
+          # Disable the default broad RDP firewall rules
+          Get-NetFirewallRule -DisplayGroup "Remote Desktop" `
+            -ErrorAction SilentlyContinue |
+            Disable-NetFirewallRule
+
+          # Re-create our Tailscale-only rule in case group operation affected anything
+          if (-not (Get-NetFirewallRule -DisplayName "RDP via Tailscale Only" -ErrorAction SilentlyContinue)) {
+              New-NetFirewallRule `
+                -DisplayName "RDP via Tailscale Only" `
+                -Direction Inbound `
+                -Protocol TCP `
+                -LocalPort 3389 `
+                -RemoteAddress 100.64.0.0/10 `
+                -Action Allow
+          }
+
+          Write-Host ""
+          Write-Host "======================================="
+          Write-Host " RDP USERNAME: devuser"
+          Write-Host " Password: stored in RDP_PASSWORD secret"
+          Write-Host "======================================="
+
+      - name: Show Tailscale address
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "======================================="
+          Write-Host "TAILSCALE INFORMATION"
+          Write-Host "======================================="
+
+          $ip = tailscale ip -4
+          Write-Host "Tailscale IP: $ip"
+          Write-Host "RDP username: devuser"
+          Write-Host "Use your RDP_PASSWORD secret as password."
+          Write-Host "======================================="
+
+          tailscale status
+
+      - name: Keep development runner available
+        shell: powershell
+        run: |
+          Write-Host "Development session is active."
+          Write-Host "Workflow will automatically stop before GitHub's job limit."
+
+          $end = (Get-Date).AddMinutes(345)
+
+          while ((Get-Date) -lt $end) {
+              $remaining = New-TimeSpan -Start (Get-Date) -End $end
+              Write-Host ("Session active - approximately {0}h {1}m remaining" -f `
+                  $remaining.Hours, $remaining.Minutes)
+
+              Start-Sleep -Seconds 300
+          }
+
+          Write-Host "Development session finished."
