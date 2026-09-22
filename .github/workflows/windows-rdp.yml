@@ -1,64 +1,67 @@
-name: Windows Development RDP
+name: Windows 2022 RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  windows-dev:
-    runs-on: windows-latest
+  rdp:
+    runs-on: windows-2022
     timeout-minutes: 355
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Connect runner to Tailscale
+      - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: Configure Windows RDP
+      - name: Configure RDP
         shell: powershell
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          # Create a dedicated temporary RDP account
-          $Username = "devuser"
-          $SecurePassword = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          $Username = "rdpuser"
+          $Password = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
 
           if (-not (Get-LocalUser -Name $Username -ErrorAction SilentlyContinue)) {
               New-LocalUser `
                 -Name $Username `
-                -Password $SecurePassword `
+                -Password $Password `
                 -PasswordNeverExpires `
                 -AccountNeverExpires
           }
 
-          # Permit RDP login
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member $Username `
+            -ErrorAction SilentlyContinue
+
           Add-LocalGroupMember `
             -Group "Remote Desktop Users" `
             -Member $Username `
             -ErrorAction SilentlyContinue
 
-          # Enable Remote Desktop
           Set-ItemProperty `
             -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
             -Name "fDenyTSConnections" `
             -Value 0
 
-          # Require Network Level Authentication
           Set-ItemProperty `
             -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
             -Name "UserAuthentication" `
             -Value 1
 
-          # Start Remote Desktop service
-          Set-Service -Name TermService -StartupType Automatic
-          Start-Service -Name TermService
+          Set-Service TermService -StartupType Automatic
+          Start-Service TermService
 
-          # Allow RDP only from Tailscale's CGNAT address range
+          Get-NetFirewallRule -DisplayGroup "Remote Desktop" `
+            -ErrorAction SilentlyContinue |
+            Disable-NetFirewallRule
+
           New-NetFirewallRule `
-            -DisplayName "RDP via Tailscale Only" `
+            -DisplayName "RDP Tailscale Only" `
             -Direction Inbound `
             -Protocol TCP `
             -LocalPort 3389 `
@@ -66,58 +69,88 @@ jobs:
             -Action Allow `
             -ErrorAction SilentlyContinue
 
-          # Disable the default broad RDP firewall rules
-          Get-NetFirewallRule -DisplayGroup "Remote Desktop" `
-            -ErrorAction SilentlyContinue |
-            Disable-NetFirewallRule
+          Write-Host "RDP configured."
 
-          # Re-create our Tailscale-only rule in case group operation affected anything
-          if (-not (Get-NetFirewallRule -DisplayName "RDP via Tailscale Only" -ErrorAction SilentlyContinue)) {
-              New-NetFirewallRule `
-                -DisplayName "RDP via Tailscale Only" `
-                -Direction Inbound `
-                -Protocol TCP `
-                -LocalPort 3389 `
-                -RemoteAddress 100.64.0.0/10 `
-                -Action Allow
-          }
-
-          Write-Host ""
-          Write-Host "======================================="
-          Write-Host " RDP USERNAME: devuser"
-          Write-Host " Password: stored in RDP_PASSWORD secret"
-          Write-Host "======================================="
-
-      - name: Show Tailscale address
+      - name: Windows 10-like desktop preferences
         shell: powershell
         run: |
-          Write-Host ""
-          Write-Host "======================================="
-          Write-Host "TAILSCALE INFORMATION"
-          Write-Host "======================================="
+          # Show file extensions
+          Set-ItemProperty `
+            -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
+            -Name "HideFileExt" `
+            -Value 0 `
+            -ErrorAction SilentlyContinue
 
+          # Show hidden files
+          Set-ItemProperty `
+            -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
+            -Name "Hidden" `
+            -Value 1 `
+            -ErrorAction SilentlyContinue
+
+          # Reduce animation effects
+          Set-ItemProperty `
+            -Path "HKCU:\Control Panel\Desktop\WindowMetrics" `
+            -Name "MinAnimate" `
+            -Value "0" `
+            -ErrorAction SilentlyContinue
+
+          # Performance preference
+          Set-ItemProperty `
+            -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" `
+            -Name "VisualFXSetting" `
+            -Value 2 `
+            -ErrorAction SilentlyContinue
+
+      - name: Install common desktop apps
+        shell: powershell
+        run: |
+          winget install Google.Chrome `
+            --accept-package-agreements `
+            --accept-source-agreements `
+            --silent `
+            --disable-interactivity
+
+          winget install 7zip.7zip `
+            --accept-package-agreements `
+            --accept-source-agreements `
+            --silent `
+            --disable-interactivity
+
+      - name: Show connection information
+        shell: powershell
+        run: |
           $ip = tailscale ip -4
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "WINDOWS RDP READY"
+          Write-Host "=========================================="
           Write-Host "Tailscale IP: $ip"
-          Write-Host "RDP username: devuser"
-          Write-Host "Use your RDP_PASSWORD secret as password."
-          Write-Host "======================================="
+          Write-Host "Username: rdpuser"
+          Write-Host "Password: use your RDP_PASSWORD secret"
+          Write-Host "=========================================="
+          Write-Host ""
 
           tailscale status
 
-      - name: Keep development runner available
+      - name: Keep RDP session alive
         shell: powershell
         run: |
-          Write-Host "Development session is active."
-          Write-Host "Workflow will automatically stop before GitHub's job limit."
+          $EndTime = (Get-Date).AddMinutes(345)
 
-          $end = (Get-Date).AddMinutes(345)
+          while ((Get-Date) -lt $EndTime) {
+              $Remaining = New-TimeSpan `
+                -Start (Get-Date) `
+                -End $EndTime
 
-          while ((Get-Date) -lt $end) {
-              $remaining = New-TimeSpan -Start (Get-Date) -End $end
-              Write-Host ("Session active - approximately {0}h {1}m remaining" -f `
-                  $remaining.Hours, $remaining.Minutes)
+              Write-Host (
+                "RDP active - {0}h {1}m remaining" -f `
+                $Remaining.Hours,
+                $Remaining.Minutes
+              )
 
               Start-Sleep -Seconds 300
           }
 
-          Write-Host "Development session finished."
+          Write-Host "Session ending."
